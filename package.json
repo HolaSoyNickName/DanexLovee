@@ -1,0 +1,21 @@
+{
+  "name": "danexlove",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma de experiencias digitales personalizables de DanexLove",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c blue,magenta \"npm run dev --workspace @danexlove/api\" \"npm run dev --workspace @danexlove/web\"",
+    "build": "npm run build --workspace @danexlove/web",
+    "test": "npm test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
