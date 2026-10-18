@@ -1,6 +1,44 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { firebaseAuth, googleProvider } from "./firebase.js";
+import { signInWithPopup, signOut } from "firebase/auth";
 
-const categories = ["Todas", "Aniversario", "Cumpleaños", "Sorpresa", "Amistad"];
+const GalaxyExperience = lazy(() => import("./GalaxyExperience.jsx"));
+
+const catalogCategories = [
+  { name: "Aniversario", slug: "aniversario", symbol: "♡", description: "Celebra su historia y todos los momentos que han compartido." },
+  { name: "Cumpleaños", slug: "cumpleanos", symbol: "✳", description: "Haz que su día especial se sienta todavía más suyo." },
+  { name: "Sorpresa", slug: "sorpresa", symbol: "✦", description: "Prepara un detalle inesperado para sacarle una sonrisa." },
+  { name: "Amistad", slug: "amistad", symbol: "☼", description: "Dile a esa persona cuánto valoras tenerla cerca." },
+];
+const pendingTemplateStorageKey = "danexlove.pending-template";
+
+function MobileMenuToggle({ open, onClick }) {
+  return (
+    <button
+      className="mobile-menu-toggle"
+      type="button"
+      aria-label={open ? "Cerrar menú" : "Abrir menú"}
+      aria-expanded={open}
+      aria-controls="primary-navigation"
+      onClick={onClick}
+    >
+      <span /><span /><span />
+    </button>
+  );
+}
+
+function readPendingTemplateSlug() {
+  const slug = window.localStorage.getItem(pendingTemplateStorageKey) ?? "";
+  return /^[a-z0-9-]{1,120}$/i.test(slug) ? slug : "";
+}
+
+function persistPendingTemplateSlug(slug) {
+  window.localStorage.setItem(pendingTemplateStorageKey, slug);
+}
+
+function clearPendingTemplateSlug() {
+  window.localStorage.removeItem(pendingTemplateStorageKey);
+}
 
 async function readApiResponse(response, failureMessage) {
   if (response.status === 429) {
@@ -17,7 +55,12 @@ async function readApiResponse(response, failureMessage) {
     }
   }
   if (!response.ok) {
-    throw new Error(result.error?.message ?? failureMessage);
+    const message = result.error?.message ?? failureMessage;
+    const diagnostic = result.error?.diagnostic;
+    const diagnosticCode = [diagnostic?.name, diagnostic?.code, diagnostic?.causeCode]
+      .filter(Boolean)
+      .join(" / ");
+    throw new Error(diagnosticCode ? `${message} (${diagnosticCode})` : message);
   }
   return result;
 }
@@ -45,20 +88,20 @@ async function copyTextToClipboard(value) {
 const steps = [
   {
     number: "01",
-    title: "Elige una idea",
-    description: "Encuentra una plantilla que se parezca a lo que quieres decir.",
+    title: "Encuentra tu idea",
+    description: "Explora las inspiraciones y previsualiza la que más conecte contigo.",
     symbol: "⌕",
   },
   {
     number: "02",
     title: "Hazla tuya",
-    description: "Agrega tus fotos, palabras y esos detalles que solo tú conoces.",
+    description: "Escribe tu mensaje, elige un tono y mira los cambios al instante.",
     symbol: "✎",
   },
   {
     number: "03",
-    title: "Compártela",
-    description: "Cuando esté lista, compártela con esa persona especial.",
+    title: "Publícala y compártela",
+    description: "Obtén tu plantilla gratuita y crea un enlace para esa persona especial.",
     symbol: "↗",
   },
 ];
@@ -122,6 +165,11 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState([]);
   const [visiblePasswords, setVisiblePasswords] = useState({});
+  const onAuthenticatedRef = useRef(onAuthenticated);
+  const onCloseRef = useRef(onClose);
+
+  onAuthenticatedRef.current = onAuthenticated;
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     setActiveMode(mode);
@@ -248,6 +296,40 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
     }
   };
 
+  const loginWithGoogle = async () => {
+    if (!firebaseAuth) {
+      setError("Configura Firebase Authentication para habilitar el acceso con Google.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const { user: firebaseUser } = await signInWithPopup(firebaseAuth, googleProvider);
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch("/api/v1/auth/google", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      });
+      const result = await readApiResponse(response, "No se pudo iniciar sesión con Google.");
+      onAuthenticatedRef.current(result.user);
+      onCloseRef.current();
+    } catch (requestError) {
+      if (requestError.code === "auth/popup-closed-by-user") {
+        setError("Se cerró la ventana de Google antes de completar el inicio de sesión.");
+      } else if (requestError.code === "auth/popup-blocked") {
+        setError("El navegador bloqueó la ventana de Google. Permite las ventanas emergentes e inténtalo de nuevo.");
+      } else {
+        setError(requestError.message || "No se pudo iniciar sesión con Google. Inténtalo de nuevo.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const revokeSession = async (sessionId) => {
     setError("");
     try {
@@ -259,6 +341,7 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
         const result = await readApiResponse(response, "No se pudo cerrar esa sesión.");
       }
       if (sessions.find((session) => session.id === sessionId)?.current) {
+        await signOutFirebase();
         onLoggedOut();
         return;
       }
@@ -277,11 +360,21 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
         credentials: "include",
       });
       if (!response.ok) throw new Error("No se pudo cerrar la sesión.");
+      await signOutFirebase();
       onLoggedOut();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const signOutFirebase = async () => {
+    if (!firebaseAuth) return;
+    try {
+      await signOut(firebaseAuth);
+    } catch {
+      setError("Se cerró la sesión de DanexLove, pero no se pudo limpiar la sesión local de Google.");
     }
   };
 
@@ -355,6 +448,28 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
             <button className="button button-dark auth-submit" type="submit" disabled={busy}>
               {busy ? "Un momento..." : activeMode === "login" ? "Iniciar sesión" : activeMode === "register" ? "Crear cuenta" : activeMode === "forgot" ? "Enviar instrucciones" : activeMode === "reset" ? "Guardar contraseña" : activeMode === "change-password" ? "Actualizar contraseña" : "Continuar"}
             </button>
+            {["login", "register"].includes(activeMode) && (
+              <div className="auth-google">
+                <span className="auth-divider">o continúa con</span>
+                {firebaseAuth ? (
+                  <button
+                    className="google-signin-placeholder"
+                    type="button"
+                    onClick={loginWithGoogle}
+                    disabled={busy}
+                  >
+                    {busy ? "Conectando con Google..." : "Continuar con Google"}
+                  </button>
+                ) : (
+                  <>
+                    <button className="google-signin-placeholder" type="button" disabled>
+                      Continuar con Google
+                    </button>
+                    <p>Configura Firebase Authentication para habilitar el acceso con Google.</p>
+                  </>
+                )}
+              </div>
+            )}
             {activeMode === "login" && (
               <button className="auth-text-button" type="button" onClick={() => setActiveMode("forgot")}>Olvidé mi contraseña</button>
             )}
@@ -618,6 +733,33 @@ function ExperienceWorkspace({ initialExperience, onClose, onOpenEditor }) {
 }
 
 function ExperiencePreview({ template, content, watermarked }) {
+  if (template.slug === "galaxia-de-amor") {
+    return (
+      <article className={`experience-preview galaxy-preview accent-${content.accentColor ?? "rose"}${watermarked ? " is-watermarked" : ""}`}>
+        <p className="preview-kicker">{template.label || "UNA SORPRESA CÓSMICA"}</p>
+        <p className="galaxy-preview-recipient">Para {content.recipientName || "alguien especial"}</p>
+        <div className="galaxy-preview-planet" aria-hidden="true"><span /></div>
+        <p className="galaxy-preview-title">{content.title || template.title}</p>
+        <p className="galaxy-preview-message">{content.message || "Tu mensaje aparecerá alrededor de este pequeño universo."}</p>
+        {watermarked && <span className="preview-watermark" aria-label="Vista previa con marca de agua">DANEXLOVE · VISTA PREVIA</span>}
+      </article>
+    );
+  }
+
+  if (template.slug === "adivina") {
+    return (
+      <article className={`experience-preview guess-preview accent-${content.accentColor ?? "rose"}${watermarked ? " is-watermarked" : ""}`}>
+        <span className="preview-kicker">{template.label || "UN RETO BONITO"}</span>
+        <p className="experience-preview-title">{content.title || template.title}</p>
+        <img src="/templates/adivina-1.png" alt="Un gatito con un ramo de flores" />
+        <p className="experience-preview-recipient">Para {content.recipientName || "alguien especial"}</p>
+        <p className="guess-preview-riddle">Verde por fuera y roja por dentro, tiene semillas de sandía y sabe a sandía. ¿Qué será?</p>
+        <p className="guess-preview-reward">Al acertar: {content.message || "tu sorpresa"}</p>
+        {watermarked && <span className="preview-watermark" aria-label="Vista previa con marca de agua">DANEXLOVE · VISTA PREVIA</span>}
+      </article>
+    );
+  }
+
   return (
     <article className={`experience-preview accent-${content.accentColor ?? "rose"}${watermarked ? " is-watermarked" : ""}`}>
       <span className="preview-kicker">{template.label || "HECHO SOLO PARA TI"}</span>
@@ -631,7 +773,7 @@ function ExperiencePreview({ template, content, watermarked }) {
   );
 }
 
-function TemplatePreviewDialog({ template, onClose }) {
+function TemplatePreviewDialog({ template, onClose, onStartExperience }) {
   const content = {
     title: template.title,
     recipientName: "alguien especial",
@@ -653,10 +795,335 @@ function TemplatePreviewDialog({ template, onClose }) {
         </header>
         <ExperiencePreview template={template} content={content} watermarked />
         <p className="preview-watermark-note">La marca se quita al obtener la plantilla gratuita.</p>
-        <button className="button button-dark" type="button" onClick={onClose}>Volver al catálogo</button>
+        <div className="template-preview-actions">
+          <button
+            className="button button-dark"
+            type="button"
+            onClick={() => onStartExperience(template.slug)}
+            disabled={template.isPremium}
+            title={template.isPremium ? "Las compras aún no están disponibles" : undefined}
+          >
+            {template.isPremium ? "Premium pronto" : "Ver opciones"}
+            {!template.isPremium && <span aria-hidden="true">→</span>}
+          </button>
+        </div>
       </section>
     </div>
   );
+}
+
+function SignInGateDialog({ onCancel, onContinue }) {
+  return (
+    <div className="studio-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onCancel();
+    }}>
+      <section className="signin-gate-dialog" role="dialog" aria-modal="true" aria-labelledby="signin-gate-title">
+        <button className="auth-close" type="button" aria-label="Cerrar" onClick={onCancel}>×</button>
+        <p className="eyebrow">DANEXLOVE</p>
+        <h2 id="signin-gate-title">Inicia sesión para continuar</h2>
+        <p>Para personalizar esta experiencia, inicia sesión o crea una cuenta. Conservaremos la plantilla que elegiste.</p>
+        <div className="signin-gate-actions">
+          <button className="button button-dark" type="button" onClick={onContinue}>Iniciar sesión / Registrarse <span aria-hidden="true">→</span></button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TemplateDetailPage({ slug, navigate }) {
+  const [template, setTemplate] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authMode, setAuthMode] = useState("");
+  const [gateOpen, setGateOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const pendingTemplateSlug = useRef(readPendingTemplateSlug());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(`/api/v1/templates/${encodeURIComponent(slug)}`, { signal: controller.signal })
+      .then((response) => readApiResponse(response, "No encontramos esta plantilla."))
+      .then((result) => setTemplate(result.template))
+      .catch((requestError) => {
+        if (requestError.name !== "AbortError") setError(requestError.message);
+      })
+      .finally(() => setLoading(false));
+
+    fetch("/api/v1/auth/me", { credentials: "include", signal: controller.signal })
+      .then((response) => {
+        if (response.status === 401) return null;
+        return readApiResponse(response, "No se pudo comprobar tu sesión.");
+      })
+      .then((result) => {
+        if (result?.user) setCurrentUser(result.user);
+      })
+      .catch((requestError) => {
+        if (requestError.name !== "AbortError") setError(requestError.message);
+      });
+    return () => controller.abort();
+  }, [slug]);
+
+  const createExperience = async (templateSlug) => {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/v1/experiences", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ templateSlug }),
+      });
+      const result = await readApiResponse(response, "No se pudo iniciar la experiencia.");
+      clearPendingTemplateSlug();
+      pendingTemplateSlug.current = "";
+      navigate(`/editor/${result.experience.id}`);
+    } catch (requestError) {
+      setError(requestError.message);
+      pendingTemplateSlug.current = templateSlug;
+      persistPendingTemplateSlug(templateSlug);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startExperience = (templateSlug) => {
+    setPreviewOpen(false);
+    if (template?.isPremium) {
+      setError("Las plantillas premium estarán disponibles cuando se habiliten las compras.");
+      return;
+    }
+    if (!currentUser) {
+      pendingTemplateSlug.current = templateSlug;
+      persistPendingTemplateSlug(templateSlug);
+      setGateOpen(true);
+      return;
+    }
+    createExperience(templateSlug);
+  };
+
+  if (loading) return <main className="editor-state" role="status">Abriendo la plantilla...</main>;
+  if (!template) {
+    return (
+      <main className="editor-state">
+        <p className="eyebrow">DANEXLOVE</p>
+        <h1>No encontramos esta plantilla</h1>
+        <p>{error || "La plantilla puede haber sido retirada del catálogo."}</p>
+        <button className="button button-dark" type="button" onClick={() => navigate("/")}>Volver a las inspiraciones</button>
+      </main>
+    );
+  }
+
+  return (
+    <>
+      <header className="site-header" id="inicio">
+        <div className="header-inner">
+          <a className="brand" href="/" aria-label="DanexLove, inicio">
+            <span className="brand-mark" aria-hidden="true">♥</span><span>Danex<span>Love</span></span>
+          </a>
+          <nav className={`main-nav${mobileMenuOpen ? " is-open" : ""}`} id="primary-navigation" aria-label="Navegación principal">
+            <a href="/" aria-current={window.location.pathname === "/" ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/"); }}>Inicio</a>
+            <a href="/templates" aria-current={window.location.pathname.startsWith("/templates") ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/templates"); }}>Plantillas</a>
+            <a href="/categorias" aria-current={window.location.pathname.startsWith("/categorias") ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/categorias"); }}>Categorías</a>
+            <button className="account-menu-button" type="button" onClick={() => { setMobileMenuOpen(false); setAuthMode(currentUser ? "account" : "login"); }}>{currentUser ? "Mi cuenta" : "Iniciar sesión"}</button>
+          </nav>
+          <button
+            className="account-button"
+            type="button"
+            onClick={() => setAuthMode(currentUser ? "account" : "login")}
+          >
+            {currentUser ? currentUser.name : "Iniciar sesión"}
+          </button>
+          <MobileMenuToggle open={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)} />
+        </div>
+      </header>
+      <main className="template-detail-page section-shell">
+        <nav className="template-breadcrumb" aria-label="Ruta de navegación">
+          <a href="/">Inicio</a><span aria-hidden="true">›</span>
+          <a href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>Plantillas</a><span aria-hidden="true">›</span>
+          <span aria-current="page">{template.title}</span>
+        </nav>
+        <section className="template-detail-grid" aria-labelledby="template-detail-title">
+          <div className={`template-art template-detail-art art-${template.style}${template.slug === "adivina" ? " art-adivina" : ""}`} aria-label={`Vista de ${template.title}`}>
+            {template.slug === "adivina" ? <img className="template-art-cat" src="/templates/adivina-1.png" alt="Un gatito con flores" /> : template.slug === "galaxia-de-amor" ? <span className="template-art-saturn" aria-hidden="true" /> : <>
+              <span className="art-label">{template.label}</span>
+              <span className="art-symbol" aria-hidden="true">{template.symbol}</span>
+              <span className="art-caption">{template.title}</span>
+            </>}
+          </div>
+          <div className="template-detail-copy">
+            <p className="eyebrow">{template.category} · {template.isPremium ? "Plantilla premium" : "Plantilla gratis"}</p>
+            <h1 id="template-detail-title">{template.title}</h1>
+            <p className="template-detail-description">{template.description}</p>
+            <p className="template-detail-author">Una inspiración de {template.author}</p>
+            <section className="template-detail-actions" aria-labelledby="template-actions-title">
+              <h2 id="template-actions-title">Empieza con esta idea</h2>
+              <button className="button button-dark" type="button" onClick={() => startExperience(template.slug)} disabled={busy || template.isPremium}>
+                {busy ? "Preparando tu experiencia..." : "Personalizar ahora"} <span aria-hidden="true">→</span>
+              </button>
+              <button className="button button-outline" type="button" onClick={() => setPreviewOpen(true)}>
+                Previsualizar
+              </button>
+              <p>{template.isPremium ? "Esta plantilla aún no está disponible para personalizar." : "Inicia sesión o crea una cuenta; después podrás personalizar, obtener la plantilla gratis y publicar tu enlace."}</p>
+            </section>
+            {error && <p className="catalog-error" role="alert">{error}</p>}
+          </div>
+        </section>
+      </main>
+      {gateOpen && (
+        <SignInGateDialog
+          onCancel={() => {
+            setGateOpen(false);
+            pendingTemplateSlug.current = "";
+            clearPendingTemplateSlug();
+          }}
+          onContinue={() => {
+            setGateOpen(false);
+            setAuthMode("login");
+          }}
+        />
+      )}
+      {authMode && (
+        <AuthDialog
+          key={authMode}
+          mode={authMode}
+          user={currentUser}
+          resetToken=""
+          onClose={() => {
+            setAuthMode("");
+            pendingTemplateSlug.current = "";
+            clearPendingTemplateSlug();
+          }}
+          onAuthenticated={(user) => {
+            setCurrentUser(user);
+            if (pendingTemplateSlug.current) createExperience(pendingTemplateSlug.current);
+          }}
+          onLoggedOut={() => {
+            setCurrentUser(null);
+            setAuthMode("");
+          }}
+        />
+      )}
+      {previewOpen && (
+        <TemplatePreviewDialog
+          template={template}
+          onClose={() => setPreviewOpen(false)}
+          onStartExperience={startExperience}
+        />
+      )}
+    </>
+  );
+}
+
+function ExploreHeader({ navigate }) {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  return (
+    <header className="site-header explore-site-header" id="inicio">
+      <div className="header-inner">
+        <a className="brand" href="/" aria-label="DanexLove, inicio" onClick={(event) => { event.preventDefault(); navigate("/"); }}>
+          <span className="brand-mark" aria-hidden="true">♥</span><span>Danex<span>Love</span></span>
+        </a>
+        <nav className={`main-nav${mobileMenuOpen ? " is-open" : ""}`} id="primary-navigation" aria-label="Navegación principal">
+          <a href="/" aria-current={window.location.pathname === "/" ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/"); }}>Inicio</a>
+          <a href="/templates" aria-current={window.location.pathname === "/templates" ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/templates"); }}>Plantillas</a>
+          <a href="/categorias" aria-current={window.location.pathname.startsWith("/categorias") ? "page" : undefined} onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/categorias"); }}>Categorías</a>
+        </nav>
+        <MobileMenuToggle open={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)} />
+      </div>
+    </header>
+  );
+}
+
+function CatalogPage({ navigate, category = "" }) {
+  const [templates, setTemplates] = useState([]);
+  const [search, setSearch] = useState("");
+  const [price, setPrice] = useState("all");
+  const [sort, setSort] = useState("newest");
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [status, setStatus] = useState("loading");
+  const [error, setError] = useState("");
+  const [previewTemplate, setPreviewTemplate] = useState(null);
+  const selectedCategory = catalogCategories.find((item) => item.slug === category);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
+      setStatus(page === 1 ? "loading" : "loading-more");
+      setError("");
+      try {
+        const params = new URLSearchParams({ page: String(page), pageSize: "12", sort });
+        if (selectedCategory) params.set("category", selectedCategory.name);
+        if (search.trim()) params.set("search", search.trim());
+        if (price !== "all") params.set("price", price);
+        const response = await fetch(`/api/v1/templates?${params}`, { signal: controller.signal });
+        const result = await readApiResponse(response, "No se pudo cargar el catálogo.");
+        setTemplates((current) => page === 1 ? result.items : [...current, ...result.items]);
+        setHasMore(page < result.pagination.totalPages);
+        setStatus("ready");
+      } catch (requestError) {
+        if (requestError.name === "AbortError") return;
+        setError(requestError.message);
+        setStatus("error");
+      }
+    }, 180);
+    return () => { clearTimeout(timeout); controller.abort(); };
+  }, [category, page, price, search, sort]);
+
+  const changeFilter = (setter, value) => { setPage(1); setter(value); };
+  const title = selectedCategory ? `Ideas para ${selectedCategory.name.toLowerCase()}` : "Explora todas las plantillas";
+
+  return (
+    <>
+      <ExploreHeader navigate={navigate} />
+      <main className="explore-page section-shell">
+        <nav className="template-breadcrumb" aria-label="Ruta de navegación">
+          <a href="/" onClick={(event) => { event.preventDefault(); navigate("/"); }}>Inicio</a><span aria-hidden="true">›</span>
+          {selectedCategory ? <><a href="/categorias" onClick={(event) => { event.preventDefault(); navigate("/categorias"); }}>Categorías</a><span aria-hidden="true">›</span><span aria-current="page">{selectedCategory.name}</span></> : <span aria-current="page">Plantillas</span>}
+        </nav>
+        <div className="section-heading explore-heading">
+          <div><p className="eyebrow">ENCUENTRA TU INSPIRACIÓN</p><h1>{title}</h1></div>
+          <p className="section-intro">Elige una idea, personalízala a tu manera y conviértela en un momento para compartir.</p>
+        </div>
+        <div className="catalog-controls explore-controls">
+          {!selectedCategory && <div className="category-filters" aria-label="Explorar categorías">
+            {catalogCategories.map((item) => <a className="filter-chip" key={item.slug} href={`/categorias/${item.slug}`} onClick={(event) => { event.preventDefault(); navigate(`/categorias/${item.slug}`); }}>{item.name}</a>)}
+          </div>}
+          <label className="search-box"><span className="search-icon" aria-hidden="true">⌕</span><span className="sr-only">Buscar plantillas</span><input type="search" placeholder="Buscar una idea..." value={search} onChange={(event) => changeFilter(setSearch, event.target.value)} /></label>
+          <label className="catalog-select-label"><span className="sr-only">Filtrar por precio</span><select className="catalog-select" value={price} onChange={(event) => changeFilter(setPrice, event.target.value)}><option value="all">Todos los precios</option><option value="free">Gratis</option><option value="premium">Premium</option></select></label>
+          <label className="catalog-select-label"><span className="sr-only">Ordenar plantillas</span><select className="catalog-select" value={sort} onChange={(event) => changeFilter(setSort, event.target.value)}><option value="newest">Más recientes</option><option value="price-asc">Gratis primero</option><option value="price-desc">Premium primero</option><option value="popular">Más populares</option></select></label>
+        </div>
+        <div className="template-grid explore-grid" aria-live="polite">
+          {templates.map((template) => <article className="template-card" key={template.id}>
+            <div className={`template-art art-${template.style}${template.slug === "adivina" ? " art-adivina" : ""}`} aria-hidden="true">
+              {template.slug === "adivina" ? <img className="template-art-cat" src="/templates/adivina-1.png" alt="" /> : template.slug === "galaxia-de-amor" ? <span className="template-art-saturn" aria-hidden="true" /> : <><span className="art-label">{template.label}</span><span className="art-symbol" aria-hidden="true">{template.symbol}</span><span className="art-caption">{template.title}</span></>}
+            </div>
+            <div className="template-info"><div className="template-meta"><span>{template.category}</span><span className="template-price">{template.priceLabel}</span></div><h3>{template.title}</h3><p>{template.description}</p><div className="template-actions"><button className="button button-dark" type="button" onClick={() => navigate(`/templates/${template.slug}`)}>Ver detalles <span aria-hidden="true">→</span></button><button className="button button-outline" type="button" onClick={() => setPreviewTemplate(template)}>Previsualizar</button></div></div>
+          </article>)}
+          {status !== "ready" && <p className={`catalog-status${status === "error" ? " catalog-error" : ""}`} role={status === "error" ? "alert" : "status"}>{status === "error" ? error : status === "loading-more" ? "Cargando más plantillas..." : "Cargando plantillas..."}</p>}
+          {status === "ready" && templates.length === 0 && <p className="empty-results">No encontramos plantillas con esos filtros. Prueba con otra búsqueda.</p>}
+        </div>
+        {hasMore && status === "ready" && <button className="load-more-button" type="button" onClick={() => setPage((current) => current + 1)}>Cargar más plantillas</button>}
+        {selectedCategory && <a className="template-back-link" href="/categorias" onClick={(event) => { event.preventDefault(); navigate("/categorias"); }}>← Ver todas las categorías</a>}
+      </main>
+      {previewTemplate && <TemplatePreviewDialog template={previewTemplate} onClose={() => setPreviewTemplate(null)} onStartExperience={(slug) => { setPreviewTemplate(null); navigate(`/templates/${slug}`); }} />}
+    </>
+  );
+}
+
+function CategoriesPage({ navigate }) {
+  return <>
+    <ExploreHeader navigate={navigate} />
+    <main className="explore-page section-shell categories-page">
+      <nav className="template-breadcrumb" aria-label="Ruta de navegación"><a href="/" onClick={(event) => { event.preventDefault(); navigate("/"); }}>Inicio</a><span aria-hidden="true">›</span><span aria-current="page">Categorías</span></nav>
+      <div className="section-heading explore-heading"><div><p className="eyebrow">UNA IDEA PARA CADA MOMENTO</p><h1>Explora por categoría</h1></div><p className="section-intro">Empieza por la ocasión o el tipo de detalle que quieres crear.</p></div>
+      <div className="category-directory">
+        {catalogCategories.map((item) => <a className="category-directory-card" href={`/categorias/${item.slug}`} key={item.slug} onClick={(event) => { event.preventDefault(); navigate(`/categorias/${item.slug}`); }}><span className="category-directory-symbol" aria-hidden="true">{item.symbol}</span><span className="eyebrow">DANEXLOVE</span><h2>{item.name}</h2><p>{item.description}</p><span className="text-link">Explorar ideas <span aria-hidden="true">→</span></span></a>)}
+      </div>
+    </main>
+  </>;
 }
 
 function ExperienceEditorPage({ experienceId, navigate }) {
@@ -668,6 +1135,8 @@ function ExperienceEditorPage({ experienceId, navigate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [previewDevice, setPreviewDevice] = useState("desktop");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -676,6 +1145,7 @@ function ExperienceEditorPage({ experienceId, navigate }) {
       .then((result) => {
         setExperience(result.experience);
         setContent(result.experience.content);
+        setDirty(false);
         setLoading(false);
       })
       .catch((requestError) => {
@@ -689,6 +1159,14 @@ function ExperienceEditorPage({ experienceId, navigate }) {
 
   const updateField = (event) => {
     setContent((current) => ({ ...current, [event.target.name]: event.target.value }));
+    setDirty(true);
+    setError("");
+    setNotice("");
+  };
+
+  const updateAccentColor = (accentColor) => {
+    setContent((current) => ({ ...current, accentColor }));
+    setDirty(true);
     setError("");
     setNotice("");
   };
@@ -703,6 +1181,7 @@ function ExperienceEditorPage({ experienceId, navigate }) {
     const result = await readApiResponse(response, "No se pudo guardar el borrador.");
     setExperience(result.experience);
     setContent(result.experience.content);
+    setDirty(false);
     return result.experience;
   };
 
@@ -746,6 +1225,7 @@ function ExperienceEditorPage({ experienceId, navigate }) {
     setError("");
     setNotice("");
     try {
+      if (!locked) await saveDraftRequest();
       const response = await fetch(`/api/v1/experiences/${experienceId}/publish`, {
         method: "POST",
         credentials: "include",
@@ -788,6 +1268,14 @@ function ExperienceEditorPage({ experienceId, navigate }) {
   const template = experience.templateSnapshot;
   const acquired = Boolean(experience.acquiredAt);
   const locked = experience.status === "published";
+  const workflowStep = shareUrl || locked ? 3 : acquired ? 2 : 1;
+  const workflowMessage = workflowStep === 3
+    ? shareUrl
+      ? "Tu experiencia está lista. Comparte el enlace con esa persona especial."
+      : "Ya está publicada. Generar otro enlace dejará de funcionar el enlace anterior."
+    : workflowStep === 2
+      ? "La plantilla ya es tuya. Publícala para crear un enlace que puedas compartir."
+      : "Personaliza tu mensaje y obtén gratis la plantilla para poder publicarla.";
 
   return (
     <main className="editor-page">
@@ -801,26 +1289,63 @@ function ExperienceEditorPage({ experienceId, navigate }) {
 
       <div className="editor-content">
         <section className="editor-fields" aria-labelledby="editor-title">
-          <p className="eyebrow">PERSONALIZA A TU MANERA</p>
+          <p className="eyebrow">PERSONALIZACIÓN · {template.category?.toUpperCase()}</p>
           <h1 id="editor-title">{template.title}</h1>
-          <p className="editor-intro">Completa estos campos. Los cambios aparecen al instante en la vista previa.</p>
-          <form className="studio-form" onSubmit={(event) => event.preventDefault()}>
-            <label>Título
-              <input name="title" value={content.title ?? ""} maxLength="120" onChange={updateField} disabled={locked} />
-            </label>
-            <label>¿Para quién es?
-              <input name="recipientName" value={content.recipientName ?? ""} maxLength="100" placeholder="Su nombre" onChange={updateField} disabled={locked} />
-            </label>
-            <label>Tu mensaje
-              <textarea name="message" value={content.message ?? ""} maxLength="3000" rows="6" placeholder="Escribe algo que quieras que recuerde..." onChange={updateField} disabled={locked} />
-              <span className="studio-count">{(content.message ?? "").length}/3000</span>
-            </label>
-            <fieldset className="studio-colors" disabled={locked}>
-              <legend>Elige un tono</legend>
-              {[["rose", "Rosa"], ["violet", "Violeta"], ["blue", "Azul"], ["sunshine", "Sol"]].map(([color, label]) => (
-                <button className={`color-swatch swatch-${color}${content.accentColor === color ? " selected" : ""}`} type="button" key={color} aria-label={label} aria-pressed={content.accentColor === color} onClick={() => setContent((current) => ({ ...current, accentColor: color }))} />
-              ))}
+          <p className="editor-intro">Hazla tuya con un mensaje, un nombre y un tono especial. Verás cada cambio en la vista previa.</p>
+          <nav className="creation-progress" aria-label="Pasos para crear tu experiencia">
+            <p>PASO {workflowStep} DE 3</p>
+            <ol>
+              {["Personaliza", "Obtén gratis", "Publica y comparte"].map((label, index) => {
+                const step = index + 1;
+                const state = step < workflowStep ? "is-complete" : step === workflowStep ? "is-current" : "";
+                return (
+                  <li className={state} key={label} aria-current={step === workflowStep ? "step" : undefined}>
+                    <span>{step < workflowStep ? "✓" : step}</span>
+                    {label}
+                  </li>
+                );
+              })}
+            </ol>
+            <span>{workflowMessage}</span>
+          </nav>
+          <form className="studio-form editor-form" onSubmit={(event) => event.preventDefault()}>
+            <section className="editor-form-section" aria-labelledby="editor-dedication-heading">
+              <div className="editor-form-section-heading">
+                <span>01</span>
+                <div><h2 id="editor-dedication-heading">La dedicatoria</h2><p>Las palabras que verá esa persona.</p></div>
+              </div>
+              <label className="editor-field">Título
+                <input name="title" value={content.title ?? ""} maxLength="120" onChange={updateField} disabled={locked || busy} placeholder="Ponle un nombre a tu sorpresa" />
+                <small>Una frase corta que le dé personalidad.</small>
+              </label>
+              <label className="editor-field">¿Para quién es?
+                <input name="recipientName" value={content.recipientName ?? ""} maxLength="100" placeholder="Su nombre" onChange={updateField} disabled={locked || busy} />
+                <small>El nombre aparecerá en la dedicatoria.</small>
+              </label>
+              <label className="editor-field editor-message-field">Tu mensaje
+                <textarea name="message" value={content.message ?? ""} maxLength="3000" rows="6" placeholder="Escribe algo que quieras que recuerde..." onChange={updateField} disabled={locked || busy} />
+                <span className="editor-message-meter" role="meter" aria-label="Longitud del mensaje" aria-valuemin="0" aria-valuemax="3000" aria-valuenow={(content.message ?? "").length}>
+                  <span style={{ width: `${Math.min(((content.message ?? "").length / 3000) * 100, 100)}%` }} />
+                </span>
+                <span className="studio-count">{(content.message ?? "").length.toLocaleString("es-MX")} / 3,000 caracteres</span>
+              </label>
+            </section>
+            <fieldset className="editor-form-section editor-tone-section" disabled={locked || busy}>
+              <legend><span>02</span> El tono</legend>
+              <p id="editor-tone-help">Elige el color de los detalles de tu diseño.</p>
+              <div className="editor-tone-options" role="group" aria-describedby="editor-tone-help">
+                {[["rose", "Rosa"], ["violet", "Violeta"], ["blue", "Azul"], ["sunshine", "Dorado"]].map(([color, label]) => (
+                  <button className={`editor-tone-option${(content.accentColor ?? "rose") === color ? " is-selected" : ""}`} type="button" key={color} aria-label={`Tono ${label}`} aria-pressed={(content.accentColor ?? "rose") === color} onClick={() => updateAccentColor(color)}>
+                    <span className={`editor-tone-swatch swatch-${color}`} aria-hidden="true">{(content.accentColor ?? "rose") === color && <span>✓</span>}</span>
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
             </fieldset>
+            <div className={`editor-save-state${dirty ? " is-dirty" : ""}`} role="status">
+              <span aria-hidden="true">{busy ? "◌" : dirty ? "●" : "✓"}</span>
+              {busy ? "Guardando tus cambios…" : dirty ? "Tienes cambios sin guardar" : locked ? "Tu experiencia está guardada" : "Todo listo para guardar"}
+            </div>
             {error && <p className="catalog-error" role="alert">{error}</p>}
             {notice && <p className="studio-notice" role="status">{notice}</p>}
             {shareUrl && (
@@ -849,12 +1374,32 @@ function ExperienceEditorPage({ experienceId, navigate }) {
                   </label>
                   <button className="button button-dark" type="button" onClick={publish} disabled={busy}>Publicar <span aria-hidden="true">↗</span></button>
                 </>
-              ) : <span className="editor-status is-acquired">Publicada</span>}
+              ) : shareUrl ? (
+                <span className="editor-status is-acquired">Publicada</span>
+              ) : (
+                <button className="button button-dark" type="button" onClick={publish} disabled={busy}>
+                  {busy ? "Creando enlace..." : "Generar nuevo enlace"}
+                </button>
+              )}
             </div>
           </form>
         </section>
-        <section className="editor-preview-column" aria-label="Vista previa en vivo">
-          <div className="editor-preview-heading"><span>Vista previa</span><span>{acquired ? "Sin marca de agua" : "Con marca de agua"}</span></div>
+        <section className={`editor-preview-column is-${previewDevice}`} aria-label="Vista previa en vivo">
+          <div className="editor-preview-heading">
+            <div><span>Vista previa</span><small>Así se verá al compartirla</small></div>
+            <div className="editor-preview-controls" role="group" aria-label="Tamaño de vista previa">
+              <button type="button" aria-pressed={previewDevice === "desktop"} onClick={() => setPreviewDevice("desktop")}>
+                <span aria-hidden="true">▭</span> Escritorio
+              </button>
+              <button type="button" aria-pressed={previewDevice === "mobile"} onClick={() => setPreviewDevice("mobile")}>
+                <span aria-hidden="true">▯</span> Móvil
+              </button>
+            </div>
+          </div>
+          <p className={`editor-preview-watermark${acquired ? " is-clean" : ""}`}>
+            <span aria-hidden="true">{acquired ? "✓" : "◉"}</span>
+            {acquired ? "Sin marca de agua" : "La marca de agua se quita al obtenerla gratis"}
+          </p>
           <ExperiencePreview template={template} content={content} watermarked={!acquired} />
         </section>
       </div>
@@ -863,23 +1408,25 @@ function ExperienceEditorPage({ experienceId, navigate }) {
 }
 
 function HomePage({ navigate }) {
-  const [activeCategory, setActiveCategory] = useState("Todas");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [priceFilter, setPriceFilter] = useState("all");
-  const [sortOrder, setSortOrder] = useState("newest");
-  const [templates, setTemplates] = useState([]);
-  const [catalogStatus, setCatalogStatus] = useState("loading");
-  const [catalogError, setCatalogError] = useState("");
-  const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(false);
+  const [featuredTemplates, setFeaturedTemplates] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
   const [authMode, setAuthMode] = useState("");
   const [authMessage, setAuthMessage] = useState("");
   const [resetToken, setResetToken] = useState("");
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [experienceSeed, setExperienceSeed] = useState(null);
-  const [pendingTemplateSlug, setPendingTemplateSlug] = useState("");
-  const [previewTemplate, setPreviewTemplate] = useState(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/v1/templates?page=1&pageSize=3&sort=newest", { signal: controller.signal })
+      .then((response) => readApiResponse(response, "No se pudieron cargar las plantillas."))
+      .then((result) => setFeaturedTemplates(result.items))
+      .catch((error) => {
+        if (error.name !== "AbortError") setFeaturedTemplates([]);
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     fetch("/api/v1/auth/me", { credentials: "include" })
@@ -918,85 +1465,19 @@ function HomePage({ navigate }) {
     }
   }, []);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    const timeout = setTimeout(async () => {
-      setCatalogStatus(page === 1 ? "loading" : "loading-more");
-      setCatalogError("");
-      if (page === 1) setTemplates([]);
-
-      const params = new URLSearchParams({
-        page: String(page),
-        pageSize: "4",
-        sort: sortOrder,
-      });
-      if (activeCategory !== "Todas") params.set("category", activeCategory);
-      if (searchTerm.trim()) params.set("search", searchTerm.trim());
-      if (priceFilter !== "all") params.set("price", priceFilter);
-
-      try {
-        const response = await fetch(`/api/v1/templates?${params}`, {
-          signal: controller.signal,
-        });
-        const result = await readApiResponse(response, "No se pudo cargar el catálogo.");
-
-        setTemplates((current) =>
-          page === 1 ? result.items : [...current, ...result.items],
-        );
-        setHasMore(page < result.pagination.totalPages);
-        setCatalogStatus("ready");
-      } catch (error) {
-        if (error.name === "AbortError") return;
-        setCatalogError(error.message);
-        setCatalogStatus("error");
-      }
-    }, 250);
-
-    return () => {
-      clearTimeout(timeout);
-      controller.abort();
-    };
-  }, [activeCategory, page, priceFilter, searchTerm, sortOrder]);
-
-  const resetPagination = (updateFilter) => {
-    setPage(1);
-    updateFilter();
-  };
-
-  const createExperienceFromTemplate = async (templateSlug) => {
-    try {
-      const response = await fetch("/api/v1/experiences", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ templateSlug }),
-      });
-      const result = await readApiResponse(response, "No se pudo iniciar la experiencia.");
-      navigate(`/editor/${result.experience.id}`);
-    } catch (error) {
-      setAuthMessage(error.message);
-    }
-  };
-
-  const startExperience = (templateSlug) => {
-    if (!currentUser) {
-      setPendingTemplateSlug(templateSlug);
-      setAuthMode("login");
-      return;
-    }
-    createExperienceFromTemplate(templateSlug);
-  };
 
   return (
     <>
       <header className="site-header" id="inicio">
         <div className="header-inner">
           <Brand />
-          <nav className="main-nav" aria-label="Navegación principal">
-            <a href="#plantillas">Inspiración</a>
-            <a href="#como-funciona">Cómo funciona</a>
-            <a href="#nosotros">Nuestra idea</a>
+          <nav className={`main-nav${mobileMenuOpen ? " is-open" : ""}`} id="primary-navigation" aria-label="Navegación principal">
+            <a href="#inicio" aria-current="page" onClick={() => setMobileMenuOpen(false)}>Inicio</a>
+            <a href="/templates" onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/templates"); }}>Plantillas</a>
+            <a href="/categorias" onClick={(event) => { event.preventDefault(); setMobileMenuOpen(false); navigate("/categorias"); }}>Categorías</a>
+            <button className="account-menu-button" type="button" onClick={() => { setMobileMenuOpen(false); setAuthMode(currentUser ? "account" : "login"); }}>{currentUser ? "Mi cuenta" : "Iniciar sesión"}</button>
             {currentUser && <button type="button" onClick={() => {
+              setMobileMenuOpen(false);
               setExperienceSeed(null);
               setWorkspaceOpen(true);
             }}>Mis experiencias</button>}
@@ -1008,11 +1489,7 @@ function HomePage({ navigate }) {
             >
               {currentUser ? currentUser.name : "Iniciar sesión"}
             </button>
-            <a className="header-button" href="#plantillas">
-            <span className="header-cta-desktop">Crear mi experiencia</span>
-            <span className="header-cta-mobile">Crear</span>
-            <span aria-hidden="true">↗</span>
-          </a>
+          <MobileMenuToggle open={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)} />
         </div>
       </header>
 
@@ -1030,7 +1507,7 @@ function HomePage({ navigate }) {
               palabras, tus fotos, tu historia. Sin código, con todo el corazón.
             </p>
             <div className="hero-actions">
-              <a className="button button-dark" href="#plantillas">
+              <a className="button button-dark" href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>
                 Encuentra tu inspiración <span aria-hidden="true">→</span>
               </a>
               <span className="hero-reassurance"><span aria-hidden="true">♡</span> Fácil de crear, especial de recibir</span>
@@ -1073,140 +1550,46 @@ function HomePage({ navigate }) {
           </div>
         </section>
 
-        <section className="occasion-strip" aria-label="Ocasiones">
-          <p>Una idea bonita para cada ocasión</p>
-          <div className="occasion-list">
-            <a href="#plantillas" onClick={() => resetPagination(() => setActiveCategory("Aniversario"))}><span aria-hidden="true">♡</span> Aniversarios</a>
-            <a href="#plantillas" onClick={() => resetPagination(() => setActiveCategory("Cumpleaños"))}><span aria-hidden="true">✳</span> Cumpleaños</a>
-            <a href="#plantillas" onClick={() => resetPagination(() => setActiveCategory("Sorpresa"))}><span aria-hidden="true">✦</span> Sorpresas</a>
-            <a href="#plantillas" onClick={() => resetPagination(() => setActiveCategory("Amistad"))}><span aria-hidden="true">☼</span> Amistad</a>
-          </div>
-        </section>
-
-        <section className="templates-section section-shell" id="plantillas" aria-labelledby="templates-title">
+        <section className="home-discovery-section section-shell" id="plantillas" aria-labelledby="templates-title">
           <div className="section-heading">
             <div>
               <p className="eyebrow">UN BUEN LUGAR PARA EMPEZAR</p>
               <h2 id="templates-title">¿Qué te gustaría crear?</h2>
             </div>
-            <p className="section-intro">
-              Ideas listas para personalizar y convertir en algo que sea muy tuyo.
-            </p>
+            <p className="section-intro">Explora por ocasión o descubre las ideas más recientes.</p>
           </div>
-
-          <div className="catalog-controls">
-            <div className="category-filters" aria-label="Filtrar por ocasión">
-              {categories.map((category) => (
-                <button
-                  className={`filter-chip${activeCategory === category ? " active" : ""}`}
-                  key={category}
-                  type="button"
-                  aria-pressed={activeCategory === category}
-                  onClick={() => resetPagination(() => setActiveCategory(category))}
-                >
-                  {category}
-                </button>
-              ))}
-            </div>
-            <label className="search-box">
-              <span className="search-icon" aria-hidden="true">⌕</span>
-              <span className="sr-only">Buscar inspiración</span>
-              <input
-                type="search"
-                placeholder="Buscar una idea..."
-                value={searchTerm}
-                onChange={(event) =>
-                  resetPagination(() => setSearchTerm(event.target.value))
-                }
-              />
-              <kbd>/</kbd>
-            </label>
-            <label className="catalog-select-label">
-              <span className="sr-only">Filtrar por precio</span>
-              <select
-                className="catalog-select"
-                value={priceFilter}
-                onChange={(event) =>
-                  resetPagination(() => setPriceFilter(event.target.value))
-                }
-              >
-                <option value="all">Todos los precios</option>
-                <option value="free">Gratis</option>
-                <option value="premium">Premium</option>
-              </select>
-            </label>
-            <label className="catalog-select-label">
-              <span className="sr-only">Ordenar plantillas</span>
-              <select
-                className="catalog-select"
-                value={sortOrder}
-                onChange={(event) =>
-                  resetPagination(() => setSortOrder(event.target.value))
-                }
-              >
-                <option value="newest">Más recientes</option>
-                <option value="price-asc">Gratis primero</option>
-                <option value="price-desc">Premium primero</option>
-                <option value="popular">Más populares</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="template-grid" aria-live="polite">
-            {templates.map((template) => (
-              <article className="template-card" key={template.id}>
-                <div className={`template-art art-${template.style}`} aria-hidden="true">
-                  <span className="art-label">{template.label}</span>
-                  <span className="art-symbol">{template.symbol}</span>
-                  <span className="art-caption">{template.title}</span>
-                </div>
-                <div className="template-info">
-                  <div className="template-meta">
-                    <span>{template.category}</span>
-                    <span className="template-price">{template.priceLabel}</span>
-                  </div>
-                  <h3>{template.title}</h3>
-                  <p>{template.description}</p>
-                  <div className="template-actions">
-                    <button
-                      className="button button-dark"
-                      type="button"
-                      onClick={() => startExperience(template.slug)}
-                      disabled={template.isPremium}
-                      title={template.isPremium ? "Las compras aún no están disponibles" : undefined}
-                    >
-                      {template.isPremium ? "Premium pronto" : "Personalizar"}
-                    </button>
-                    <button className="button button-outline" type="button" onClick={() => setPreviewTemplate(template)}>
-                      Previsualizar
-                    </button>
-                  </div>
-                </div>
-              </article>
+          <div className="home-category-links">
+            {catalogCategories.map((item) => (
+              <a href={`/categorias/${item.slug}`} key={item.slug} onClick={(event) => { event.preventDefault(); navigate(`/categorias/${item.slug}`); }}>
+                <span aria-hidden="true">{item.symbol}</span><strong>{item.name}</strong><span className="home-category-arrow" aria-hidden="true">↗</span>
+              </a>
             ))}
-            {catalogStatus === "loading" && (
-              <p className="catalog-status" role="status">Cargando inspiraciones...</p>
-            )}
-            {catalogStatus === "loading-more" && (
-              <p className="catalog-status" role="status">Cargando más plantillas...</p>
-            )}
-            {catalogStatus === "error" && (
-              <p className="catalog-status catalog-error" role="alert">{catalogError}</p>
-            )}
-            {catalogStatus === "ready" && templates.length === 0 && (
-              <p className="empty-results">
-                No encontramos ideas con esa búsqueda. Prueba con otra palabra o categoría.
-              </p>
-            )}
           </div>
-          {hasMore && catalogStatus === "ready" && (
-            <button className="load-more-button" type="button" onClick={() => setPage((current) => current + 1)}>
-              Cargar más plantillas
-            </button>
+          {featuredTemplates.length > 0 && (
+            <>
+              <div className="home-featured-heading"><p className="eyebrow">RECIÉN LLEGADAS</p><h3>Ideas para empezar</h3></div>
+              <div className="template-grid home-featured-grid">
+                {featuredTemplates.map((template) => (
+                  <article className="template-card" key={template.id}>
+                    <div className={`template-art art-${template.style}${template.slug === "adivina" ? " art-adivina" : ""}`} aria-hidden="true">
+                      {template.slug === "adivina" ? <img className="template-art-cat" src="/templates/adivina-1.png" alt="" /> : template.slug === "galaxia-de-amor" ? <span className="template-art-saturn" aria-hidden="true" /> : <><span className="art-label">{template.label}</span><span className="art-symbol">{template.symbol}</span><span className="art-caption">{template.title}</span></>}
+                    </div>
+                    <div className="template-info">
+                      <div className="template-meta"><span>{template.category}</span><span className="template-price">{template.priceLabel}</span></div>
+                      <h3>{template.title}</h3>
+                      <p>{template.description}</p>
+                      <div className="template-actions home-featured-actions">
+                        <button className="button button-dark" type="button" onClick={() => navigate(`/templates/${template.slug}`)}>Ver plantilla <span aria-hidden="true">→</span></button>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </>
           )}
-          <p className="catalog-note">
-            Inspiraciones de muestra guardadas en el catálogo. Los precios y la popularidad aún no son comerciales.
-          </p>
+          <a className="button button-dark home-explore-button" href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>
+            Explorar todas las plantillas <span aria-hidden="true">→</span>
+          </a>
         </section>
 
         <section className="how-section" id="como-funciona" aria-labelledby="how-title">
@@ -1215,7 +1598,7 @@ function HomePage({ navigate }) {
               <p className="eyebrow">ASÍ DE SENCILLO</p>
               <h2 id="how-title">De una idea a un<br /><span>momento inolvidable.</span></h2>
               <p>No necesitas saber de diseño ni de tecnología. Solo pensar en esa persona.</p>
-              <a className="text-link" href="#plantillas">Encuentra tu idea <span aria-hidden="true">→</span></a>
+              <a className="text-link" href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>Encuentra tu idea <span aria-hidden="true">→</span></a>
             </div>
             <div className="steps-list">
               {steps.map((step) => (
@@ -1238,7 +1621,7 @@ function HomePage({ navigate }) {
           <p className="eyebrow">LAS COSAS BONITAS MERECEN COMPARTIRSE</p>
           <h2 id="closing-title">Tu historia merece<br />un espacio <em>propio.</em></h2>
           <p>Empieza con una idea. Lo demás lo haces tú.</p>
-          <a className="button button-light" href="#plantillas">
+          <a className="button button-light" href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>
             Explora las inspiraciones <span aria-hidden="true">→</span>
           </a>
         </section>
@@ -1253,7 +1636,7 @@ function HomePage({ navigate }) {
           <div className="footer-links">
             <div>
               <span className="footer-heading">EXPLORA</span>
-              <a href="#plantillas">Inspiraciones</a>
+              <a href="/templates" onClick={(event) => { event.preventDefault(); navigate("/templates"); }}>Inspiraciones</a>
               <a href="#como-funciona">Cómo funciona</a>
             </div>
             <div>
@@ -1287,11 +1670,6 @@ function HomePage({ navigate }) {
           }}
           onAuthenticated={(user) => {
             setCurrentUser(user);
-            if (pendingTemplateSlug) {
-              const templateSlug = pendingTemplateSlug;
-              setPendingTemplateSlug("");
-              createExperienceFromTemplate(templateSlug);
-            }
           }}
           onLoggedOut={() => {
             setCurrentUser(null);
@@ -1311,7 +1689,7 @@ function HomePage({ navigate }) {
           }}
         />
       )}
-      {previewTemplate && <TemplatePreviewDialog template={previewTemplate} onClose={() => setPreviewTemplate(null)} />}
+
     </>
   );
 }
@@ -1338,6 +1716,14 @@ function PublicExperiencePage({ token }) {
     return <main className="public-state"><p className="eyebrow">DANEXLOVE</p><h1>Este enlace ya no está disponible.</h1><p>{error}</p><a className="button button-dark" href="/">Ir al inicio</a></main>;
   }
 
+  if (experience.template.slug === "adivina") {
+    return <GuessExperience experience={experience} />;
+  }
+
+  if (experience.template.slug === "galaxia-de-amor") {
+    return <Suspense fallback={<main className="galaxy-loading" role="status">Preparando esta galaxia…</main>}><GalaxyExperience experience={experience} /></Suspense>;
+  }
+
   return (
     <main className={`public-experience accent-${experience.content.accentColor}`}>
       <a className="public-brand" href="/">♥ <span>DanexLove</span></a>
@@ -1348,6 +1734,56 @@ function PublicExperiencePage({ token }) {
         <h1>{experience.content.title}</h1>
         <p className="public-message">{experience.content.message}</p>
         <span className="public-signature">con todo mi cariño</span>
+      </article>
+      <p className="public-footer">Una experiencia creada con DanexLove</p>
+    </main>
+  );
+}
+
+function GuessExperience({ experience }) {
+  const [answer, setAnswer] = useState("");
+  const [solved, setSolved] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const { content, template } = experience;
+
+  const checkAnswer = (event) => {
+    event.preventDefault();
+    const normalizedAnswer = answer.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z]/g, "");
+    if (normalizedAnswer === "sandia") {
+      setSolved(true);
+      setFeedback("");
+      return;
+    }
+    setFeedback("Mmm, esa no era. ¡Intenta otra vez!");
+  };
+
+  return (
+    <main className={`guess-experience accent-${content.accentColor}`}>
+      <a className="public-brand" href="/">♡ <span>DanexLove</span></a>
+      <article className="guess-card" aria-labelledby="guess-title">
+        <p className="eyebrow">{template.label || "UN RETO BONITO"}</p>
+        <p className="public-recipient">Para {content.recipientName}</p>
+        <h1 id="guess-title">{content.title}</h1>
+        {!solved ? (
+          <>
+            <img className="guess-art" src="/templates/adivina-1.png" alt="Un gatito con flores" />
+            <p className="guess-riddle">Verde por fuera y roja por dentro, tiene semillas de sandía y sabe a sandía. ¿Qué será?</p>
+            <form className="guess-form" onSubmit={checkAnswer}>
+              <label htmlFor="guess-answer">Escribe tu respuesta</label>
+              <div>
+                <input id="guess-answer" value={answer} onChange={(event) => { setAnswer(event.target.value); setFeedback(""); }} autoComplete="off" required />
+                <button className="button button-dark" type="submit">Enviar respuesta</button>
+              </div>
+              <p className="guess-feedback" role={feedback ? "alert" : "status"}>{feedback}</p>
+            </form>
+          </>
+        ) : (
+          <div className="guess-reveal" role="status">
+            <p className="guess-success">¡Correcto!</p>
+            <img className="guess-art" src="/templates/adivina-2.jpg" alt="Un gatito para celebrar que acertaste" />
+            <p className="guess-prize">{content.message}</p>
+          </div>
+        )}
       </article>
       <p className="public-footer">Una experiencia creada con DanexLove</p>
     </main>
@@ -1374,6 +1810,16 @@ function App() {
 
   const editorMatch = pathname.match(/^\/editor\/([0-9a-f-]{36})\/?$/i);
   if (editorMatch) return <ExperienceEditorPage experienceId={editorMatch[1]} navigate={navigate} />;
+
+  const templateMatch = pathname.match(/^\/templates\/([a-z0-9-]{1,120})\/?$/i);
+  if (templateMatch) return <TemplateDetailPage slug={templateMatch[1]} navigate={navigate} />;
+
+  if (/^\/categorias\/?$/i.test(pathname)) return <CategoriesPage navigate={navigate} />;
+  const categoryMatch = pathname.match(/^\/categorias\/([a-z0-9-]{1,80})\/?$/i);
+  if (categoryMatch && catalogCategories.some((item) => item.slug === categoryMatch[1].toLowerCase())) {
+    return <CatalogPage category={categoryMatch[1].toLowerCase()} navigate={navigate} />;
+  }
+  if (/^\/templates\/?$/i.test(pathname)) return <CatalogPage navigate={navigate} />;
 
   return <HomePage navigate={navigate} />;
 }

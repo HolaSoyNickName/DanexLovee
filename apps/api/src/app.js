@@ -8,6 +8,7 @@ import {
   experienceErrorHandler,
 } from "./routes/experiences.js";
 import { createTemplateRouter } from "./routes/templates.js";
+import { createOriginValidator } from "./security/session-middleware.js";
 
 export function createApp({
   templateRepository,
@@ -22,8 +23,22 @@ export function createApp({
     app.set("trust proxy", "loopback");
   }
   app.disable("x-powered-by");
-  app.use(helmet());
-  app.use(cors({ origin: webOrigin, credentials: true }));
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        scriptSrc: ["'self'"],
+        frameSrc: ["'self'"],
+        connectSrc: ["'self'"],
+      },
+    },
+  }));
+  const isAllowedOrigin = createOriginValidator(webOrigin);
+  app.use(cors({
+    origin(origin, callback) {
+      callback(null, !origin || isAllowedOrigin(origin));
+    },
+    credentials: true,
+  }));
   app.use(express.json({ limit: "100kb" }));
 
   app.get("/api/v1/health", (_request, response) => {
@@ -57,11 +72,22 @@ export function createApp({
   app.use(experienceErrorHandler);
 
   app.use((error, _request, response, _next) => {
-    console.error("Error interno al procesar una solicitud de la API.");
+    const diagnostic = process.env.NODE_ENV === "production"
+      ? undefined
+      : {
+        name: error?.name ?? "Error",
+        code: error?.code,
+        causeCode: error?.original?.code ?? error?.cause?.code,
+        location: error?.stack?.split("\n").slice(1, 4).map((line) => line.trim()),
+      };
+    console.error("Error interno al procesar una solicitud de la API.", {
+      ...diagnostic,
+    });
     response.status(500).json({
       error: {
         code: "INTERNAL_ERROR",
         message: "Ocurrió un error inesperado.",
+        ...(diagnostic ? { diagnostic } : {}),
       },
     });
   });

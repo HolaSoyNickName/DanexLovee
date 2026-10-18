@@ -11,6 +11,19 @@ const snapshotFields = [
   "label",
 ];
 
+function getInitialContent(templateSnapshot) {
+  return {
+    title: templateSnapshot.title,
+    recipientName: "",
+    message: templateSnapshot.slug === "adivina"
+      ? "¡Sabía que lo acertarías! Me debes unos besotes 💋"
+      : templateSnapshot.slug === "galaxia-de-amor"
+        ? "Te amo con todo mi corazón y alma para siempre, mi amor eterno."
+        : "",
+    accentColor: "rose",
+  };
+}
+
 export function createExperienceRepository({
   Experience,
   PublicExperienceLink,
@@ -35,12 +48,7 @@ export function createExperienceRepository({
             templateSnapshot: Object.fromEntries(
               snapshotFields.map((field) => [field, templateData[field]]),
             ),
-            content: {
-              title: templateData.title,
-              recipientName: "",
-              message: "",
-              accentColor: "rose",
-            },
+            content: getInitialContent(templateData),
             status: "draft",
             acquiredAt: null,
             publishedAt: null,
@@ -83,12 +91,7 @@ export function createExperienceRepository({
         });
         if (!experience || experience.status !== "draft") return null;
         await experience.update({
-          content: {
-            title: experience.templateSnapshot.title,
-            recipientName: "",
-            message: "",
-            accentColor: "rose",
-          },
+          content: getInitialContent(experience.templateSnapshot),
         }, { transaction });
         return experience;
       });

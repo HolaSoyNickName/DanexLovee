@@ -21,6 +21,7 @@ La web y la API están en desarrollo. El catálogo, las cuentas y el primer fluj
 |---|---|---|
 | Web | React + JavaScript + Vite | Base creada |
 | API | Node.js + Express + JavaScript, REST `/api/v1` | Base creada |
+| Autenticación Google | Firebase Authentication en web; Firebase Admin para verificar el ID token | Cliente integrado; requiere configurar el proyecto Firebase y sus credenciales en la API |
 | Persistencia | PostgreSQL | Esquema inicial migrable; falta configurar `DATABASE_URL` |
 | ORM | Sequelize | Usado por el primer módulo; sigue sujeto a evaluación según la especificación |
 | Estilo | Monolito modular, por capas y dominios | Estructura por desarrollar |
@@ -35,6 +36,7 @@ No existe aquí una aplicación NestJS/TypeORM ni datos que migrar. Por lo tanto
 - Los precios, permisos y transiciones de estado se deciden en el backend.
 - Validación de entradas, autenticación y autorización preceden a las operaciones privadas.
 - Integraciones de pagos, correo y archivos se encapsulan en adaptadores cuando se implementen.
+- Firebase se limita al inicio de sesión con Google; usuarios, sesiones y experiencias permanecen en PostgreSQL.
 - La versión actual solo renderiza texto escapado por React. Si se agregan plantillas ejecutables, no compartirán origen ni privilegios con el panel; el sandbox/CSP requiere definir capacidades y dominio público.
 - PostgreSQL será fuente de verdad relacional y transaccional cuando se configure.
 
@@ -45,6 +47,7 @@ No existe aquí una aplicación NestJS/TypeORM ni datos que migrar. Por lo tanto
 | React + JavaScript + Vite | Objetivo aceptado para el arranque | Alineado con la arquitectura oficial |
 | Node.js + Express + JavaScript | Objetivo aceptado para el arranque | API REST versionada |
 | PostgreSQL | Objetivo aceptado; no configurado | Faltan esquema y entorno |
+| Firebase Authentication | Solo proveedor Google; no sustituye la API ni PostgreSQL | La API valida ID tokens con Firebase Admin y mantiene sus propias sesiones |
 | Sequelize | Provisional | No se da por definitivo ni migrado |
 | Monolito modular | Objetivo aceptado | No se justifica microservicios para el MVP |
 | Cookie de sesión segura | Opción inicial documentada | Falta definir detalles y controles CSRF |

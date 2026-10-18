@@ -3,8 +3,9 @@ import { after, before, describe, it } from "node:test";
 import { createApp } from "../src/app.js";
 import { createAuthService } from "../src/services/auth-service.js";
 import { verifyPassword, hashPassword } from "../src/security/passwords.js";
+import { createOriginValidator } from "../src/security/session-middleware.js";
 
-function createAuthFixture() {
+function createAuthFixture({ firebaseTokenVerifier } = {}) {
   const users = new Map();
   const sessions = new Map();
   const tokens = new Map();
@@ -13,6 +14,9 @@ function createAuthFixture() {
   const repository = {
     async findUserByEmail(email) {
       return users.get(email) ?? null;
+    },
+    async findUserByGoogleSubject(googleSubject) {
+      return [...users.values()].find((user) => user.googleSubject === googleSubject) ?? null;
     },
     async findUserById(userId) {
       return [...users.values()].find((user) => user.id === userId) ?? null;
@@ -94,6 +98,7 @@ function createAuthFixture() {
   const authService = createAuthService({
     repository,
     mailer,
+    firebaseTokenVerifier,
     password: {
       async hash(value) {
         return `hashed:${value}`;
@@ -191,6 +196,114 @@ describe("Autenticación", () => {
       password: "otra contraseña segura",
     })).user.email, "ana@example.com");
   });
+
+  it("crea y reutiliza una cuenta Google solo con correo verificado", async () => {
+    const fixture = createAuthFixture({
+      firebaseTokenVerifier: async (idToken) => {
+        assert.equal(idToken, "signed-google-token");
+        return {
+          sub: "google-user-123",
+          email: "Google.User@example.com",
+          email_verified: true,
+          name: "Google User",
+          sign_in_provider: "google.com",
+        };
+      },
+    });
+
+    const firstLogin = await fixture.authService.loginWithGoogle("signed-google-token");
+    assert.equal(firstLogin.user.email, "google.user@example.com");
+    assert.equal(firstLogin.user.name, "Google User");
+    assert.equal(firstLogin.user.emailVerified, true);
+    assert.equal(fixture.users.size, 1);
+    assert.equal(fixture.users.get("google.user@example.com").passwordHash, null);
+
+    const secondLogin = await fixture.authService.loginWithGoogle("signed-google-token");
+    assert.equal(secondLogin.user.id, firstLogin.user.id);
+    assert.equal(fixture.sessions.size, 2);
+  });
+
+  it("vincula Google a una cuenta pendiente con el mismo correo verificado", async () => {
+    const fixture = createAuthFixture({
+      firebaseTokenVerifier: async () => ({
+        sub: "google-user-456",
+        email: "ana@example.com",
+        email_verified: true,
+        name: "Ana Google",
+        sign_in_provider: "google.com",
+      }),
+    });
+    await fixture.authService.register({
+      name: "Ana",
+      email: "ana@example.com",
+      password: "12345678",
+    });
+
+    const result = await fixture.authService.loginWithGoogle("signed-google-token");
+    assert.equal(result.user.emailVerified, true);
+    assert.equal(fixture.users.get("ana@example.com").googleSubject, "google-user-456");
+    assert.equal(fixture.users.get("ana@example.com").passwordHash, "hashed:12345678");
+  });
+
+  it("rechaza las cuentas Google cuyo correo no está verificado", async () => {
+    const fixture = createAuthFixture({
+      firebaseTokenVerifier: async () => ({
+        sub: "google-user-unverified",
+        email: "ana@example.com",
+        email_verified: false,
+        name: "Ana",
+        sign_in_provider: "google.com",
+      }),
+    });
+
+    await assert.rejects(
+      fixture.authService.loginWithGoogle("signed-google-token"),
+      { code: "INVALID_GOOGLE_CREDENTIAL" },
+    );
+    assert.equal(fixture.users.size, 0);
+    assert.equal(fixture.sessions.size, 0);
+  });
+
+  it("rechaza tokens Firebase de proveedores distintos de Google", async () => {
+    const fixture = createAuthFixture({
+      firebaseTokenVerifier: async () => ({
+        sub: "firebase-user",
+        email: "ana@example.com",
+        email_verified: true,
+        name: "Ana",
+        sign_in_provider: "password",
+      }),
+    });
+
+    await assert.rejects(
+      fixture.authService.loginWithGoogle("signed-firebase-token"),
+      { code: "INVALID_GOOGLE_CREDENTIAL" },
+    );
+    assert.equal(fixture.users.size, 0);
+    assert.equal(fixture.sessions.size, 0);
+  });
+
+  it("distingue un token Firebase inválido de un error del servicio", async () => {
+    const invalidTokenFixture = createAuthFixture({
+      firebaseTokenVerifier: async () => {
+        throw Object.assign(new Error("Expired token"), { code: "auth/id-token-expired" });
+      },
+    });
+    const unavailableFixture = createAuthFixture({
+      firebaseTokenVerifier: async () => {
+        throw new Error("Firebase certificate service unavailable");
+      },
+    });
+
+    await assert.rejects(
+      invalidTokenFixture.authService.loginWithGoogle("expired-token"),
+      { code: "INVALID_GOOGLE_CREDENTIAL", status: 401 },
+    );
+    await assert.rejects(
+      unavailableFixture.authService.loginWithGoogle("valid-token"),
+      { code: "FIREBASE_AUTH_UNAVAILABLE", status: 503 },
+    );
+  });
 });
 
 describe("Rutas de autenticación", () => {
@@ -239,12 +352,104 @@ describe("Rutas de autenticación", () => {
     });
     assert.equal(minimumLength.status, 202);
 
+    const localNetwork = await fetch(`${baseUrl}/api/v1/auth/register`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://192.168.0.8:5175",
+      },
+      body: JSON.stringify({
+        name: "Ana",
+        email: "lan@example.com",
+        password: "12345678",
+      }),
+    });
+    assert.equal(localNetwork.status, 202);
+    assert.equal(
+      localNetwork.headers.get("access-control-allow-origin"),
+      "http://192.168.0.8:5175",
+    );
+
+    const alternatePort = await fetch(`${baseUrl}/api/v1/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://localhost:5174" },
+      body: JSON.stringify({ name: "Ana", email: "port-5174@example.com", password: "12345678" }),
+    });
+    assert.equal(alternatePort.status, 202);
+
     const forbidden = await fetch(`${baseUrl}/api/v1/auth/logout`, {
       method: "POST",
       headers: { Origin: "https://malicious.example" },
     });
     assert.equal(forbidden.status, 403);
     assert.equal((await forbidden.json()).error.code, "INVALID_ORIGIN");
+  });
+
+  it("informa cuando Firebase Authentication todavía no está configurado", async () => {
+    const response = await fetch(`${baseUrl}/api/v1/auth/google`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "http://localhost:5173" },
+      body: JSON.stringify({ idToken: "signed-firebase-token" }),
+    });
+
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, "FIREBASE_AUTH_UNAVAILABLE");
+  });
+
+  it("inicia sesión desde una credencial de Google verificada y establece cookie", async () => {
+    const googleFixture = createAuthFixture({
+      firebaseTokenVerifier: async (idToken) => {
+        assert.equal(idToken, "verified-firebase-token");
+        return {
+          sub: "google-route-user",
+          email: "google-route@example.com",
+          email_verified: true,
+          name: "Google Route",
+          sign_in_provider: "google.com",
+        };
+      },
+    });
+    const googleServer = createApp({ authService: googleFixture.authService }).listen(0);
+    await new Promise((resolve, reject) => {
+      googleServer.once("listening", resolve);
+      googleServer.once("error", reject);
+    });
+
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${googleServer.address().port}/api/v1/auth/google`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "http://localhost:5173",
+          },
+          body: JSON.stringify({ idToken: "verified-firebase-token" }),
+        },
+      );
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("set-cookie"), /HttpOnly/i);
+      assert.match(response.headers.get("content-security-policy"), /script-src[^;]*'self'/);
+      assert.equal((await response.json()).user.email, "google-route@example.com");
+    } finally {
+      await new Promise((resolve, reject) => {
+        googleServer.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("en producción solo permite los orígenes configurados explícitamente", () => {
+    const isAllowedOrigin = createOriginValidator("https://danexlove.example", false);
+    const isAllowedDevelopmentOrigin = createOriginValidator("http://localhost:5173", true);
+
+    assert.equal(isAllowedOrigin("https://danexlove.example"), true);
+    assert.equal(isAllowedOrigin("http://192.168.0.8:5175"), false);
+    assert.equal(isAllowedOrigin("http://localhost:5173"), false);
+    assert.equal(isAllowedDevelopmentOrigin("http://192.168.0.8:5175"), true);
+    assert.equal(isAllowedDevelopmentOrigin("https://192.168.0.8:5175"), false);
+    assert.equal(isAllowedDevelopmentOrigin("http://10.0.97.122:4173"), false);
+    assert.equal(isAllowedDevelopmentOrigin("http://192.168.0.8:5200"), false);
+    assert.equal(isAllowedDevelopmentOrigin("http://8.8.8.8:5174"), false);
   });
 
   it("responde JSON localizado cuando se supera el límite de intentos de inicio de sesión", async () => {

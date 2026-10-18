@@ -44,19 +44,40 @@ async function sendLink({ email, name, token, webOrigin, subject, path, purpose 
   link.searchParams.set("token", token);
   const safeName = escapeHtml(name);
   const safeLink = escapeHtml(link.toString());
+  const mailTransport = createTransport();
+  let result;
+
   try {
-    await createTransport().sendMail({
+    result = await mailTransport.sendMail({
       from: SMTP_FROM,
       to: email,
       subject,
       text: `${purpose}\n\n${link.toString()}\n\nSi no solicitaste este correo, puedes ignorarlo.`,
       html: `<p>Hola ${safeName}:</p><p>${purpose}</p><p><a href="${safeLink}">Continuar en DanexLove</a></p><p>Si no solicitaste este correo, puedes ignorarlo.</p>`,
     });
-  } catch {
+  } catch (error) {
+    console.error("Falló el envío de un correo transaccional.", {
+      purpose: subject,
+      code: error.code ?? null,
+      responseCode: error.responseCode ?? null,
+      command: error.command ?? null,
+    });
     throw new EmailDeliveryUnavailableError(
       "No se pudo enviar el correo. Comprueba la configuración SMTP e inténtalo de nuevo.",
     );
   }
+
+  if (result.accepted.length === 0) {
+    console.error("El servidor SMTP no aceptó el destinatario.", {
+      purpose: subject,
+      responseCode: result.responseCode ?? null,
+    });
+    throw new EmailDeliveryUnavailableError(
+      "El servidor de correo no aceptó el destinatario. Comprueba la dirección e inténtalo de nuevo.",
+    );
+  }
+
+  console.info("El servidor SMTP aceptó un correo transaccional.", { purpose: subject });
 }
 
 export const emailService = {

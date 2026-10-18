@@ -39,7 +39,26 @@ export function validateExperienceContent(value) {
   };
 }
 
-export function createExperienceService(repository, webOrigin = "http://localhost:5173") {
+function getShareOrigin(webOrigin) {
+  const origin = new URL(webOrigin);
+  const octets = origin.hostname.split(".").map(Number);
+  const isPrivateIpv4 = octets.length === 4 && (
+    octets[0] === 10
+    || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+    || (octets[0] === 192 && octets[1] === 168)
+  );
+  const isLocalOrigin = ["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)
+    || isPrivateIpv4;
+
+  if (!isLocalOrigin) origin.protocol = "https:";
+  return origin.origin;
+}
+
+export function createExperienceService(
+  repository,
+  webOrigin = process.env.WEB_ORIGIN ?? "http://localhost:5173",
+) {
+  const shareOrigin = getShareOrigin(webOrigin);
   return {
     create(ownerId, templateSlug) {
       return repository.createFromTemplate(ownerId, templateSlug);
@@ -105,7 +124,7 @@ export function createExperienceService(repository, webOrigin = "http://localhos
 
       return {
         experience: published,
-        shareUrl: new URL(`/e/${token}`, webOrigin).toString(),
+        shareUrl: new URL(`/e/${token}`, shareOrigin).toString(),
         expiresAt,
       };
     },
