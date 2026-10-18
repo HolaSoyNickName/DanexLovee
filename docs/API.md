@@ -10,6 +10,7 @@ La API usa el prefijo `/api/v1`.
 | `POST` | `/api/v1/auth/register` | `202` genérico | Crear cuenta y enviar verificación |
 | `POST` | `/api/v1/auth/verification/resend` | `202` genérico | Reenviar verificación |
 | `POST` | `/api/v1/auth/verification/confirm` | Usuario público | Confirmar correo con token de un solo uso |
+| `POST` | `/api/v1/auth/google` | Usuario público y cookie | Validar ID token de Firebase y abrir una sesión |
 | `POST` | `/api/v1/auth/login` | Usuario público y cookie | Iniciar sesión |
 | `POST` | `/api/v1/auth/logout` | `204` | Revocar la sesión actual |
 | `GET` | `/api/v1/auth/me` | Usuario público | Consultar cuenta autenticada |
@@ -37,7 +38,6 @@ La migración inicial carga seis plantillas y etiquetas de precio demostrativas.
 
 El registro requiere `name`, `email` y una contraseña de 8 a 128 caracteres. Se normaliza el correo a minúsculas; las contraseñas se derivan con scrypt y nunca se devuelven. La cuenta no puede iniciar sesión hasta verificar el correo. Registro, reenvío de verificación y recuperación responden de forma genérica para no revelar si existe una cuenta. Si se repite el registro de una cuenta aún pendiente, se reenvía el enlace de verificación. Los enlaces de verificación vencen en 24 horas y los de recuperación en una hora; son de un solo uso.
 
-
-La sesion de DanexLove usa un token aleatorio opaco cuyo hash SHA-256 se almacena en PostgreSQL. El cliente recibe una cookie `HttpOnly`, `SameSite=Strict`, `Secure` en produccion, con duracion de 30 dias y alcance `/api/v1/auth`. Las mutaciones rechazan un encabezado `Origin` ajeno a la politica configurada. El login tiene limite de intentos por IP. Cambiar la contrasena renueva la sesion actual y revoca las demas.
+El acceso con Google usa Firebase Authentication en el cliente. `POST /api/v1/auth/google` recibe `{ "idToken": "..." }`; la API valida la firma, revocación, proyecto y proveedor `google.com` del token con Firebase Admin, y solo admite correos verificados. Las cuentas se vinculan mediante el UID de Firebase y el correo verificado. Configura `FIREBASE_PROJECT_ID` en la API y las variables públicas `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID` y `VITE_FIREBASE_APP_ID` en la web. La sesión de DanexLove sigue siendo un token aleatorio opaco cuyo hash SHA-256 se almacena en PostgreSQL. El cliente recibe una cookie `HttpOnly`, `SameSite=Strict`, `Secure` en producción, con duración de 30 días y alcance `/api/v1/auth`. Las mutaciones de autenticación rechazan un encabezado `Origin` ajeno a la política de orígenes: `WEB_ORIGIN` en producción y, solo en desarrollo, localhost o direcciones IPv4 privadas por los puertos web `5173` a `5199`. Login tiene límite de intentos por IP. El endpoint de cambio de contraseña renueva la sesión actual y revoca las demás.
 
 Las rutas que necesitan usuario responden `401 UNAUTHENTICATED`; credenciales inválidas responden el mismo error sin distinguir cuentas o correos no verificados. Los tokens de correo nunca se devuelven en la API. Las operaciones de correo requieren SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`); sin este servicio responden `503 EMAIL_UNAVAILABLE`. Aún falta ejecutar pruebas de integración de migraciones y transacciones contra la base PostgreSQL configurada.

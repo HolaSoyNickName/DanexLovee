@@ -1,4 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { firebaseAuth, googleProvider } from "./firebase.js";
+import { signInWithPopup, signOut } from "firebase/auth";
 
 const GalaxyExperience = lazy(() => import("./GalaxyExperience.jsx"));
 
@@ -294,6 +296,40 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
     }
   };
 
+  const loginWithGoogle = async () => {
+    if (!firebaseAuth) {
+      setError("Configura Firebase Authentication para habilitar el acceso con Google.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const { user: firebaseUser } = await signInWithPopup(firebaseAuth, googleProvider);
+      const idToken = await firebaseUser.getIdToken();
+      const response = await fetch("/api/v1/auth/google", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      });
+      const result = await readApiResponse(response, "No se pudo iniciar sesión con Google.");
+      onAuthenticatedRef.current(result.user);
+      onCloseRef.current();
+    } catch (requestError) {
+      if (requestError.code === "auth/popup-closed-by-user") {
+        setError("Se cerró la ventana de Google antes de completar el inicio de sesión.");
+      } else if (requestError.code === "auth/popup-blocked") {
+        setError("El navegador bloqueó la ventana de Google. Permite las ventanas emergentes e inténtalo de nuevo.");
+      } else {
+        setError(requestError.message || "No se pudo iniciar sesión con Google. Inténtalo de nuevo.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const revokeSession = async (sessionId) => {
     setError("");
     try {
@@ -305,6 +341,7 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
         const result = await readApiResponse(response, "No se pudo cerrar esa sesión.");
       }
       if (sessions.find((session) => session.id === sessionId)?.current) {
+        await signOutFirebase();
         onLoggedOut();
         return;
       }
@@ -323,11 +360,21 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
         credentials: "include",
       });
       if (!response.ok) throw new Error("No se pudo cerrar la sesión.");
+      await signOutFirebase();
       onLoggedOut();
     } catch (requestError) {
       setError(requestError.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const signOutFirebase = async () => {
+    if (!firebaseAuth) return;
+    try {
+      await signOut(firebaseAuth);
+    } catch {
+      setError("Se cerró la sesión de DanexLove, pero no se pudo limpiar la sesión local de Google.");
     }
   };
 
@@ -401,6 +448,28 @@ function AuthDialog({ mode, user, resetToken, onClose, onAuthenticated, onLogged
             <button className="button button-dark auth-submit" type="submit" disabled={busy}>
               {busy ? "Un momento..." : activeMode === "login" ? "Iniciar sesión" : activeMode === "register" ? "Crear cuenta" : activeMode === "forgot" ? "Enviar instrucciones" : activeMode === "reset" ? "Guardar contraseña" : activeMode === "change-password" ? "Actualizar contraseña" : "Continuar"}
             </button>
+            {["login", "register"].includes(activeMode) && (
+              <div className="auth-google">
+                <span className="auth-divider">o continúa con</span>
+                {firebaseAuth ? (
+                  <button
+                    className="google-signin-placeholder"
+                    type="button"
+                    onClick={loginWithGoogle}
+                    disabled={busy}
+                  >
+                    {busy ? "Conectando con Google..." : "Continuar con Google"}
+                  </button>
+                ) : (
+                  <>
+                    <button className="google-signin-placeholder" type="button" disabled>
+                      Continuar con Google
+                    </button>
+                    <p>Configura Firebase Authentication para habilitar el acceso con Google.</p>
+                  </>
+                )}
+              </div>
+            )}
             {activeMode === "login" && (
               <button className="auth-text-button" type="button" onClick={() => setActiveMode("forgot")}>Olvidé mi contraseña</button>
             )}

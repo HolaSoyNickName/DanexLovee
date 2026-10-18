@@ -9,6 +9,7 @@ export function defineAuthModels(sequelize) {
       email: { type: DataTypes.STRING(320), allowNull: false, unique: true },
       passwordHash: { type: DataTypes.STRING(255), allowNull: true },
       emailVerifiedAt: { type: DataTypes.DATE, allowNull: true },
+      googleSubject: { type: DataTypes.STRING(255), allowNull: true, unique: true },
       role: { type: DataTypes.STRING(20), allowNull: false, defaultValue: "user" },
     },
     { tableName: "users" },
