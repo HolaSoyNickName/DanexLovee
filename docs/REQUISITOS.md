@@ -7,7 +7,6 @@ DanexLove permite descubrir, adquirir, personalizar, publicar y compartir experi
 | Módulo oficial | Prioridad orientativa | Estado en esta base |
 |---|---:|---|
 | Inicio y navegación pública | P0 | Parcial; portada y catálogo conectados, con datos demostrativos |
-| Cuentas y autenticación | P0 | Parcial: registro, verificación, login/logout, perfil, recuperación/cambio de contraseña y gestión de sesiones; Google se autentica con Firebase, y PostgreSQL/SMTP requieren configuración |
 | Catálogo y fichas de plantillas | P0 | Parcial; API de listado/ficha, búsqueda, filtros y paginación; datos reales y páginas de detalle pendientes |
 | Editor visual | P0 | Parcial; editor dedicado con vista previa y marca de agua, campos de texto y tono; sin imágenes, bloques ni versiones |
 | Experiencias y enlaces públicos | P0 | Parcial; borrador, adquisición gratis persistida, publicación, caducidad, revocación y página pública; checkout premium pendiente |

@@ -6,10 +6,6 @@ export function createAuthRepository({ User, Session, EmailToken, sequelize }) {
       return User.findOne({ where: { email } });
     },
 
-    findUserByGoogleSubject(googleSubject) {
-      return User.findOne({ where: { googleSubject } });
-    },
-
     createUser(user) {
       return User.create(user);
     },

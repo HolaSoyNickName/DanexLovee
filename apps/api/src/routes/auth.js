@@ -113,29 +113,6 @@ export function createAuthRouter({
     }
   });
 
-  router.post("/google", loginLimiter, async (request, response, next) => {
-    const { idToken } = request.body ?? {};
-    if (typeof idToken !== "string" || idToken.length > 8192) {
-      return errorResponse(
-        response,
-        400,
-        "INVALID_FIREBASE_ID_TOKEN",
-        "El token de Firebase no es válido. Inténtalo de nuevo.",
-      );
-    }
-
-    try {
-      const { token, expiresAt, user } = await authService.loginWithGoogle(idToken);
-      response.cookie("danexlove_session", token, {
-        ...sessionCookieOptions(secureCookies),
-        expires: expiresAt,
-      });
-      return response.status(200).json({ user });
-    } catch (error) {
-      return next(error);
-    }
-  });
-
   router.post("/login", loginLimiter, async (request, response, next) => {
     const { email, password } = request.body ?? {};
     if (!validEmail(email) || typeof password !== "string" || password.length > maxPasswordLength) {

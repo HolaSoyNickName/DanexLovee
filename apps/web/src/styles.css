@@ -1341,12 +1341,6 @@ h2 {
   opacity: 0.7;
 }
 
-.auth-google {
-  display: grid;
-  gap: 10px;
-  justify-items: center;
-}
-
 .auth-divider {
   width: 100%;
   display: flex;
@@ -1364,35 +1358,7 @@ h2 {
   content: "";
 }
 
-.google-signin-button {
-  width: 100%;
-  min-height: 40px;
-  display: flex;
-  justify-content: center;
-}
 
-.google-signin-placeholder {
-  width: 100%;
-  min-height: 40px;
-  border: 1px solid #d8d8df;
-  border-radius: 999px;
-  color: #444;
-  background: white;
-  font-size: 0.78rem;
-  font-weight: 600;
-}
-
-.google-signin-placeholder:disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.auth-google > p {
-  margin: 0;
-  color: #85869c;
-  font-size: 0.65rem;
-  text-align: center;
-}
 
 .auth-text-button,
 .auth-switch button {
