@@ -33,7 +33,7 @@ export async function connectDatabase(databaseUrl = process.env.DATABASE_URL) {
 
   const queryInterface = sequelize.getQueryInterface();
   const migrations = new Umzug({
-    migrations: { glob: "migrations/*.js", cwd: apiDirectory },
+    migrations: { glob: ["migrations/*.js", { cwd: apiDirectory }] },
     context: queryInterface,
     storage: new SequelizeStorage({ sequelize }),
     logger: console,
